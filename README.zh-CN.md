@@ -8,6 +8,8 @@
 
 参见[与原始仓库的区别](docs/upstream-differences.md)：包括比较基线、功能差异、所在分支和交付状态。
 
+维护更新请参见[同步上游并保留自有优化](docs/upstream-sync.md)，使用 `npm run upstream:check` 检查、`npm run upstream:prepare` 准备独立合并工作区。
+
 ---
 
 [English](README.md) | [简体中文](README.zh-CN.md)
