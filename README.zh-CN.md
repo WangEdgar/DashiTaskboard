@@ -1,3 +1,13 @@
+# DashiTaskboard — 独立维护版
+
+基于 [chuspeeism/dashi-taskboard](https://github.com/chuspeeism/dashi-taskboard)，保留上游历史和 Apache-2.0 许可证。
+
+本仓库面向可复用的 Windows 开发协作工具。经理联动、TaskMaster 数据交换与 Windows 生命周期修复暂存于独立开发分支，等待整合和验收；当前尚未发布自有安装版本。
+
+`origin` 指向本仓库，`upstream` 保留原项目更新来源。本机数据库、附件、凭据和私人会话绑定不进入源码仓库。
+
+---
+
 [English](README.md) | [简体中文](README.zh-CN.md)
 
 # Codex Taskboard

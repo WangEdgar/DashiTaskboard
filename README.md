@@ -1,3 +1,13 @@
+# DashiTaskboard — independently maintained edition
+
+Based on [chuspeeism/dashi-taskboard](https://github.com/chuspeeism/dashi-taskboard). Upstream history and the Apache-2.0 license are retained.
+
+This repository is being prepared for a reusable Windows developer tool. Project manager coordination, TaskMaster data transfer, and Windows lifecycle fixes are maintained on separate development branches until integration and acceptance are complete. No new distribution release is claimed yet.
+
+Use `origin` for this repository and `upstream` for the original project. Do not upload local databases, attachments, credentials, or personal conversation bindings.
+
+---
+
 [English](README.md) | [简体中文](README.zh-CN.md)
 
 # Codex Taskboard
