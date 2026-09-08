@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createProjectManagerCoordinator } from "./project-manager-coordinator.mjs";
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
@@ -2085,6 +2086,37 @@ async function enqueueCurrentQuotaPolicy(projectId) {
   );
 }
 
+
+let managerCoordinator;
+let managerCoordinatorTimer;
+function ensureManagerCoordinator() {
+  if (!managerCoordinator) {
+    managerCoordinator = createProjectManagerCoordinator({
+      request: taskboardRequest,
+      runtimeFile: taskboardRuntimeFile,
+      rpc: (host, method, params) => requestCodexAppServerViaCdp(
+        currentQuotaPolicyCdp(), undefined, host, method, params,
+      ),
+      disableLegacy: async (projectId) => {
+        await ensureQuotaPoliciesLoaded();
+        const record = quotaPolicyRecords.get(projectId);
+        if (!record?.request.enabledByUser) return;
+        await updateAndApplyQuotaPolicy({ ...record.request, enabledByUser: false },
+          (method, params) => requestCodexAutomationViaCdp(currentQuotaPolicyCdp(), undefined, method, params));
+      },
+      log: (message) => console.error(message),
+    });
+  }
+  const check = () => managerCoordinator.tick().catch((error) => {
+    console.error("Taskboard manager check failed: " + error.message);
+  });
+  if (!managerCoordinatorTimer) {
+    managerCoordinatorTimer = setInterval(check, 15_000);
+    managerCoordinatorTimer.unref();
+  }
+  void check();
+}
+
 async function restoreQuotaPolicies(cdp) {
   registerQuotaPolicyCdp(cdp);
   if (restoredQuotaPolicyCdps.has(cdp)) return;
@@ -2092,7 +2124,10 @@ async function restoreQuotaPolicies(cdp) {
   if (pending) return pending;
   const restoring = (async () => {
     await ensureQuotaPoliciesLoaded();
+    const coordination = await taskboardRequest("/api/local/coordination");
+    const managed = new Set((coordination.projects ?? []).filter((item) => item.config.enabled).map((item) => item.projectId));
     for (const [projectId, record] of quotaPolicyRecords) {
+      if (managed.has(projectId)) continue;
       if (record.request.enabledByUser) {
         await enqueueCurrentQuotaPolicy(projectId);
       }
@@ -2102,6 +2137,7 @@ async function restoreQuotaPolicies(cdp) {
   quotaPolicyRestorePromises.set(cdp, restoring);
   try {
     await restoring;
+    ensureManagerCoordinator();
   } finally {
     quotaPolicyRestorePromises.delete(cdp);
   }
@@ -2929,6 +2965,8 @@ async function main() {
   const requestStop = () => {
     if (stopping) return;
     stopping = true;
+    clearInterval(managerCoordinatorTimer);
+    managerCoordinator?.stop();
     wakeCodexRendererRequests();
     wakeStop();
     cleanup().catch((error) => {

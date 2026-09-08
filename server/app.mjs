@@ -49,6 +49,8 @@ import {
   isLocalCompanionRoute,
 } from "./cloud-proxy.mjs";
 import { TaskboardDatabase } from "./database.mjs";
+import { ProjectCoordination } from "./project-coordination.mjs";
+import { TaskmasterTransfer } from "./taskmaster-transfer.mjs";
 import { createJiraConfigStore } from "./jira-config.mjs";
 import { createJiraIntegration } from "./jira-integration.mjs";
 import { ProjectSummaryService } from "./project-summary.mjs";
@@ -1476,6 +1478,7 @@ export function createTaskboardServer(options = {}) {
   );
   const routePrefix = resolved.instanceToken ? `/${resolved.instanceToken}` : "";
   const database = new TaskboardDatabase(resolved.databasePath);
+  let coordination;
   const events = new EventHub();
   let clientStorageWrite = Promise.resolve();
 
@@ -2349,6 +2352,48 @@ export function createTaskboardServer(options = {}) {
         });
       }
 
+
+      if (pathname === "/api/local/coordination" || /^\/api\/projects\/[^/]+\/coordination(?:\/[^/]+)?$/.test(pathname)) {
+        assertLoopbackRequest(request);
+        if (configuredTrustedRequest || (await cloudConfig.read()).remoteUrl) {
+          throw new ApiError(409, "COORDINATION_LOCAL_ONLY", "Manager coordination requires the device-local project store");
+        }
+        coordination ??= new ProjectCoordination(database, events);
+        if (pathname === "/api/local/coordination") {
+          if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+          return sendJson(response, 200, coordination.list());
+        }
+        const match = pathname.match(/^\/api\/projects\/([^/]+)\/coordination(?:\/([^/]+))?$/);
+        const projectId = decodeURIComponent(match[1]);
+        const action = match[2];
+        if (!action && request.method === "GET") return sendJson(response, 200, coordination.get(projectId));
+        if (!action && request.method === "PUT") return sendJson(response, 200, coordination.configure(projectId, await readJson(request)));
+        if (["claim", "dispatch", "report", "runtime"].includes(action) && request.method === "POST") {
+          return sendJson(response, 200, coordination[action](projectId, await readJson(request)));
+        }
+        return methodNotAllowed(response, action ? ["POST"] : ["GET", "PUT"]);
+      }
+
+      const taskmasterRoute = pathname.match(/^\/api\/projects\/([^/]+)\/taskmaster(?:\/(preview|import|export|backup))?$/);
+      if (taskmasterRoute) {
+        assertLoopbackRequest(request);
+        if (configuredTrustedRequest || (await cloudConfig.read()).remoteUrl) {
+          throw new ApiError(409, "TASKMASTER_LOCAL_ONLY", "TaskMaster transfer requires the device-local project store");
+        }
+        const projectId = decodeURIComponent(taskmasterRoute[1]);
+        const action = taskmasterRoute[2];
+        const transfer = new TaskmasterTransfer(database, { attachmentsDirectory: resolved.attachmentsDirectory, events });
+        if (!action && request.method === "GET") return sendJson(response, 200, await transfer.detect(projectId, url.searchParams.get("tag") ?? undefined));
+        if (["preview", "import"].includes(action) && request.method === "POST") {
+          return sendJson(response, 200, transfer[action](projectId, await readJson(request, 16 * 1024 * 1024, "TaskMaster document cannot exceed 16 MiB")));
+        }
+        if (["export", "backup"].includes(action) && request.method === "GET") {
+          const result = await transfer[action](projectId);
+          response.setHeader("content-disposition", 'attachment; filename="taskboard-' + action + '.json"');
+          return sendJson(response, 200, result);
+        }
+        return methodNotAllowed(response, ["preview", "import"].includes(action) ? ["POST"] : ["GET"]);
+      }
 
       let currentCloudConfig = null;
       if (pathname.startsWith("/api/")) {

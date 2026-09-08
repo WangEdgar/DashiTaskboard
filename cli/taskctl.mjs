@@ -30,6 +30,12 @@ const BOOLEAN_OPTIONS = new Set(["json", "clear-binding-thread", "help"]);
 const GLOBAL_OPTIONS = new Set(["runtime-file"]);
 
 const COMMAND_OPTIONS = new Map([
+  ["taskmaster detect", new Set(["json"])],
+  ...["preview", "import"].map(action => ["taskmaster " + action, new Set(["file", "tag", "json"])]),
+  ...["export", "backup"].map(action => ["taskmaster " + action, new Set(["output", "json"])]),
+  ["coordination get", new Set(["json"])],
+  ["coordination configure", new Set(["file", "json"])],
+  ...["claim", "dispatch", "report"].map(action => ["coordination " + action, new Set(["task-ids", "versions", "manager-id", "thread-id", "state", "message", "json"])]),
   ["project list", new Set(["json"])],
   ["project create", new Set(["id", "name", "workspace-path", "json"])],
   ["project map", new Set(["workspace-path", "json"])],
@@ -123,6 +129,8 @@ const HELP_TEXT = new Map([
   ["", `Usage: taskctl RESOURCE ACTION [options]
 
 Commands:
+  taskmaster detect|preview|import|export|backup PROJECT_ID (see taskmaster --help)
+  coordination get|configure|claim|dispatch|report PROJECT_ID (see coordination --help)
   context current [--cwd PATH] [--json]
   project list
   project create --name NAME [--id ID] [--workspace-path PATH]
@@ -150,6 +158,27 @@ Examples:
   taskctl comment list LOCAL-275 --json
 
 Run taskctl issue --help for all issue arguments.`],
+  ["taskmaster", `Usage: taskctl taskmaster ACTION PROJECT_ID [options]
+
+  detect                         Detect .taskmaster/tasks/tasks.json in the project
+  preview [--file JSON] [--tag TAG]
+  import [--file JSON] [--tag TAG] Import missing source IDs; never overwrite existing tasks
+  export --output FILE           Export task data as TaskMaster JSON
+  backup --output FILE           Back up project tasks, comments, attachments and manager configuration
+
+Without --file, preview/import read the detected project file. SQLite remains the primary store.
+Exports and backups are explicit snapshots, not automatic two-way synchronization.`],
+  ["coordination", `Usage: taskctl coordination ACTION PROJECT_ID [options]
+
+  get
+  configure --file CONFIG_JSON
+  claim --task-ids ID1,ID2 --versions JSON [--thread-id GENERAL_ID]
+  dispatch --task-ids ID1,ID2 --versions JSON --manager-id ID [--thread-id GENERAL_ID]
+  report --task-ids ID1,ID2 --versions JSON --state STATE --message TEXT [--thread-id BUSINESS_ID]
+
+Versions must map task ids to the versions you just read. Read full issue comments and attachments before claiming or dispatching.
+STATE is waiting_user, blocked, interrupted, or awaiting_review; completion always requires human acceptance.
+--thread-id defaults to CODEX_THREAD_ID. Use the installed runtime descriptor via --runtime-file when needed.`],
   ["issue", `Usage: taskctl issue ACTION [arguments] [options]
 
 Actions:
@@ -310,7 +339,7 @@ async function execute(parsed, overrides) {
   const allowedOptions = COMMAND_OPTIONS.get(command);
   if (!allowedOptions) {
     throw usageError(
-      "Expected one of: project list/create/map/readme, cloud login/status/logout, issue list/get/create/update/move/archive/restore/tree/relation, comment list/add/update/delete, attachment list/download/upload, context current",
+      "Expected one of: taskmaster detect/preview/import/export/backup, coordination get/configure/claim/dispatch/report, project list/create/map/readme, cloud login/status/logout, issue list/get/create/update/move/archive/restore/tree/relation, comment list/add/update/delete, attachment list/download/upload, context current",
     );
   }
   validateOptions(parsed.options, allowedOptions);
@@ -325,6 +354,18 @@ async function execute(parsed, overrides) {
       : await resolveTaskboardBaseUrl(env, overrides);
   const api = createApiClient(overrides, target);
   switch (command) {
+    case "taskmaster detect":
+    case "taskmaster preview":
+    case "taskmaster import":
+    case "taskmaster export":
+    case "taskmaster backup":
+      return executeTaskmaster(api, parsed, overrides);
+    case "coordination get":
+    case "coordination configure":
+    case "coordination claim":
+    case "coordination dispatch":
+    case "coordination report":
+      return executeCoordination(api, parsed, overrides);
     case "project list":
       expectOperandCount(parsed, 0);
       return api.request("GET", "/api/projects");
@@ -713,6 +754,58 @@ function guessContentType(filename) {
     default:
       return "application/octet-stream";
   }
+}
+
+async function executeTaskmaster(api, parsed, overrides) {
+  expectOperandCount(parsed, 1);
+  const projectId = parsed.operands[0];
+  const endpoint = `/api/projects/${encodeURIComponent(projectId)}/taskmaster`;
+  if (parsed.action === "detect") return api.request("GET", endpoint);
+  if (parsed.action === "export" || parsed.action === "backup") {
+    const output = resolveInputPath(requiredOption(parsed.options, "output"), overrides);
+    const document = await api.request("GET", `${endpoint}/${parsed.action}`);
+    const content = JSON.stringify(document, null, 2) + "\n";
+    await (overrides.writeFile ?? writeFile)(output, content, "utf8");
+    return { projectId, output, kind: parsed.action, bytes: Buffer.byteLength(content) };
+  }
+  let document;
+  if (parsed.options.file !== undefined) {
+    const input = resolveInputPath(parsed.options.file, overrides);
+    try {
+      document = JSON.parse(String(await (overrides.readFile ?? readFile)(input, "utf8")).replace(/^\uFEFF/, ""));
+    } catch (error) {
+      throw usageError(`Cannot read TaskMaster JSON: ${error.message}`);
+    }
+  } else {
+    const detected = await api.request("GET", endpoint);
+    if (!detected.found) throw usageError("No .taskmaster/tasks/tasks.json found; supply --file");
+    document = detected.document;
+  }
+  return api.request("POST", `${endpoint}/${parsed.action}`, {
+    document, ...optionalField("tag", parsed.options.tag),
+  });
+}
+
+async function executeCoordination(api, parsed, overrides) {
+  expectOperandCount(parsed, 1);
+  const base = "/api/projects/" + encodeURIComponent(parsed.operands[0]) + "/coordination";
+  if (parsed.action === "get") return api.request("GET", base);
+  if (parsed.action === "configure") {
+    const content = await (overrides.readFile ?? readFile)(requiredOption(parsed.options, "file"), "utf8");
+    let config;
+    try { config = JSON.parse(content); } catch { throw usageError("Configuration file must contain JSON"); }
+    return api.request("PUT", base, config);
+  }
+  let versions;
+  try { versions = JSON.parse(requiredOption(parsed.options, "versions")); } catch { throw usageError("--versions must contain a task-id to version JSON object"); }
+  const body = {
+    taskIds: requiredOption(parsed.options, "task-ids").split(",").map(id => id.trim()),
+    versions,
+    threadId: resolveThreadId(parsed.options, overrides),
+    ...(parsed.action === "dispatch" ? { managerId: requiredOption(parsed.options, "manager-id") } : {}),
+    ...(parsed.action === "report" ? { state: requiredOption(parsed.options, "state"), message: requiredOption(parsed.options, "message") } : {}),
+  };
+  return api.request("POST", base + "/" + parsed.action, body);
 }
 
 async function executeProjectReadme(api, parsed, overrides) {

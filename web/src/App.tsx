@@ -75,6 +75,8 @@ import {
   RefreshIcon,
   RelationIcon,
 } from "./components/SemanticIcons";
+import { TaskmasterTransfer } from "./components/TaskmasterTransfer";
+import { ProjectCoordination } from "./components/ProjectCoordination";
 import { ProjectAutomationMenu } from "./components/ProjectAutomationMenu";
 import { TaskboardIcon } from "./components/TaskboardIcon";
 import { TaskContextMenu } from "./components/TaskContextMenu";
@@ -3467,6 +3469,8 @@ export function App() {
           <div ref={dragRegionRef} className="workspace-drag-region" aria-hidden="true" />
 
           <div className="header-actions">
+            {selectedProject && <TaskmasterTransfer key={selectedProject.id} project={selectedProject} />}
+            {selectedProject && <ProjectCoordination key={selectedProject.id} project={selectedProject} projectIdentity={automationProjectContext} onOpenThread={openThread} />}
             {selectedProject && (
               <ProjectAutomationMenu
                 automation={selectedProjectAutomation}
