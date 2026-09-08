@@ -6,6 +6,8 @@
 
 `origin` 指向本仓库，`upstream` 保留原项目更新来源。本机数据库、附件、凭据和私人会话绑定不进入源码仓库。
 
+参见[与原始仓库的区别](docs/upstream-differences.md)：包括比较基线、功能差异、所在分支和交付状态。
+
 ---
 
 [English](README.md) | [简体中文](README.zh-CN.md)

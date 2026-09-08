@@ -6,6 +6,8 @@ This repository is being prepared for a reusable Windows developer tool. Project
 
 Use `origin` for this repository and `upstream` for the original project. Do not upload local databases, attachments, credentials, or personal conversation bindings.
 
+See [Differences from upstream / 与原始仓库的区别](docs/upstream-differences.md) for the comparison baseline, feature branches, and delivery status.
+
 ---
 
 [English](README.md) | [简体中文](README.zh-CN.md)
