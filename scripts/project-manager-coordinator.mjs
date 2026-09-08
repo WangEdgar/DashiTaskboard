@@ -224,16 +224,36 @@ export function createProjectManagerCoordinator({ request, rpc, runtimeFile, dis
     const general = threads.get("general");
     if (!general || isBusy(general.thread)) return;
     const latest = await request(projectPath(projectId));
-    const relevant = tasks.filter((task) => task.status === "todo" || task.status === "in_progress");
-    const outcomes = (latest.assignments ?? []).filter((item) => ["awaiting_review", "waiting_user", "interrupted", "blocked"].includes(item.state));
-    if (!relevant.length && !outcomes.length) {
-      if (latest.runtime?.general?.state !== "idle") await updateRuntime(projectId, { managerId: "general", state: "idle", message: "没有需要认领、续做或核对的任务。" });
+    const relevant = tasks.filter((task) => {
+      if (task.source === "jira" || task.relations?.blockedBy?.some(item => item.status !== "done")) return false;
+      const lastComment = task.coordinationComments.at(-1)?.body ?? "";
+      if (/(?:请|暂时|暂不|先|需要).{0,8}(?:暂停|等待|不要执行|不要开发)|等待(?:确认|确定|验收|通知)|on hold|do not (?:start|implement)/i.test((task.description ?? "") + "\n" + lastComment)) return false;
+      const assignment = (latest.assignments ?? []).find(item => item.taskIds.includes(task.id));
+      const bound = task.threadBinding?.threadId ?? task.threadId;
+      if (!assignment) return task.status === "todo" && (!bound || bound === general.manager.threadId);
+      if (assignment.claimantThreadId !== general.manager.threadId || ["queued", "running"].includes(assignment.state)) return false;
+      if (bound && ![assignment.claimantThreadId, assignment.executorThreadId].includes(bound)) return false;
+      return task.status === "todo" || (task.status === "in_progress" && assignment.state === "claimed");
+    });
+    if (!relevant.length) {
+      if (latest.runtime?.general?.state !== "idle" || latest.runtime?.general?.fingerprint) await updateRuntime(projectId, { managerId: "general", state: "idle", message: "没有需要总经理分配的任务。", fingerprint: null });
       return;
     }
-    const fingerprint = hash([latest.config.version, taskFingerprint(relevant), outcomes]);
-    if (latest.runtime?.general?.fingerprint === fingerprint) return;
+    let notified = {};
     try {
-      await startTurn({ projectId, ...latest }, "general", general.manager, fingerprint, relevant);
+      const saved = JSON.parse(latest.runtime?.general?.fingerprint ?? "null");
+      if (saved?.kind === "allocation") notified = saved.requests ?? {};
+    } catch { /* Earlier fingerprints were a single hash; evaluate eligible work once. */ }
+    const requests = Object.fromEntries(relevant.map(task => [task.id, hash([
+      general.manager.threadId,
+      // Claiming is part of the same allocation request, not a new notification.
+      taskFingerprint([{ ...task, status: "allocation", threadBinding: null }]),
+    ])]));
+    const pendingTasks = relevant.filter(task => notified[task.id] !== requests[task.id]);
+    if (!pendingTasks.length) return;
+    const fingerprint = JSON.stringify({ kind: "allocation", requests });
+    try {
+      await startTurn({ projectId, ...latest }, "general", general.manager, fingerprint, pendingTasks);
     } catch (error) {
       await updateRuntime(projectId, { managerId: "general", state: "interrupted", message: error.message });
     }

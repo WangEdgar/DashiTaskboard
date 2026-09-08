@@ -6,6 +6,8 @@ In a project's manager panel, reuse existing conversation IDs or request automat
 
 Task status and actual execution activity are separate. Approval and input waits are displayed explicitly. Missing connections are not interpreted as completed work, and no task is automatically marked done.
 
+The resident scheduler checks in the background but wakes the general manager only for eligible allocation work: unclaimed todo tasks, claimed work not yet dispatched, or work explicitly returned to todo. Running, queued, waiting, blocked and review results alone do not trigger a general-manager message. Requests are deduplicated per task and persisted before sending. A business report or a partial allocation does not resend unchanged requests. Do not configure a periodic heartbeat in the general-manager conversation as a substitute for this scheduler.
+
 The local server persists coordination in SQLite. The injected coordinator communicates with Codex; merely starting the standalone web preview does not start this integration. `taskctl coordination --help` lists claim, dispatch and report commands.
 
 Development validation covers isolated HTTP operations, a controlled RPC adapter and browser flows. Full installed-runtime acceptance and release remain pending. No local project IDs, private conversation IDs or user data are included in this document.
