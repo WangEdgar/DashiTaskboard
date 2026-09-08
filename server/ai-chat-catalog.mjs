@@ -278,7 +278,7 @@ function resolvedWorkspace(projectId, project, workspaces) {
   }
   return {
     workspacePath,
-    addDirectories: [...new Set(workspaces.values())].filter((candidate) => candidate !== workspacePath),
+    addDirectories: [], // A project conversation must not grant access to other saved projects.
     project,
   };
 }

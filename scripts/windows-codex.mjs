@@ -133,15 +133,59 @@ export function activateWindowsCodex(appPath, profilePath, port, environment, ru
 }
 
 export function stopWindowsCodex(pid, environment, run = spawnSync) {
-  const result = run("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
-    encoding: "utf8",
-    env: environment,
-    windowsHide: true,
-  });
-  if (result.error) throw result.error;
-  if (result.status !== 0 && !/not found|not running/i.test(result.stderr || "")) {
-    throw new Error(result.stderr?.trim() || `Unable to stop Codex process ${pid}`);
+  runWindowsPowerShell(String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class TaskboardNormalClose {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct UniqueProcess {
+    public uint ProcessId;
+    public System.Runtime.InteropServices.ComTypes.FILETIME StartTime;
   }
+  [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+  private static extern int RmStartSession(out uint session, int flags, StringBuilder key);
+  [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+  private static extern int RmRegisterResources(uint session, uint files, string[] names, uint count, UniqueProcess[] processes, uint services, string[] serviceNames);
+  [DllImport("rstrtmgr.dll")]
+  private static extern int RmShutdown(uint session, uint flags, IntPtr callback);
+  [DllImport("rstrtmgr.dll")]
+  private static extern int RmEndSession(uint session);
+  public static bool Request(uint pid, long startTime) {
+    uint session;
+    int result = RmStartSession(out session, 0, new StringBuilder(33));
+    if (result != 0) throw new InvalidOperationException("RmStartSession: " + result);
+    try {
+      var target = new UniqueProcess { ProcessId = pid };
+      target.StartTime.dwLowDateTime = unchecked((int)startTime);
+      target.StartTime.dwHighDateTime = (int)(startTime >> 32);
+      result = RmRegisterResources(session, 0, null, 1, new[] { target }, 0, null);
+      if (result != 0) throw new InvalidOperationException("RmRegisterResources: " + result);
+      // Zero flags requests normal shutdown; RmForceShutdown is never used.
+      result = RmShutdown(session, 0, IntPtr.Zero);
+      if (result != 0) throw new InvalidOperationException("Codex rejected normal shutdown: " + result);
+      return true;
+    } finally { RmEndSession(session); }
+  }
+}
+'@
+$targetId = [int]$env:CODEX_TASKBOARD_STOP_PID
+$target = Get-Process -Id $targetId -ErrorAction SilentlyContinue
+if ($null -eq $target) { return }
+try {
+  if ($target.HasExited) { return }
+  if (-not [TaskboardNormalClose]::Request($targetId, $target.StartTime.ToUniversalTime().ToFileTimeUtc())) {
+    throw "Codex did not accept a normal close request; restart canceled to preserve the conversation."
+  }
+  if (-not $target.WaitForExit(30000)) {
+    throw "Codex is still saving or waiting for confirmation; restart canceled without forcing it to exit."
+  }
+} finally {
+  $target.Dispose()
+}
+`, { ...environment, CODEX_TASKBOARD_STOP_PID: String(pid) }, run);
 }
 
 export function windowsCodexProfileArgument(command, profilePath) {
@@ -153,4 +197,35 @@ export function windowsCodexProfileArgument(command, profilePath) {
 export function windowsRootProcesses(processes) {
   const processIds = new Set(processes.map((record) => record.pid));
   return processes.filter((record) => !processIds.has(record.parentPid));
+}
+
+export function focusWindowsCodex(pid, environment = process.env, run = spawnSync) {
+  if (!pid) return;
+  runWindowsPowerShell(String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class TaskboardFocus {
+  private delegate bool Visitor(IntPtr window, IntPtr parameter);
+  [DllImport("user32.dll")] private static extern bool EnumWindows(Visitor visitor, IntPtr parameter);
+  [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
+  [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+  [DllImport("user32.dll")] private static extern bool ShowWindowAsync(IntPtr window, int command);
+  [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
+  public static void Focus(uint pid) {
+    EnumWindows((window, parameter) => {
+      uint owner; GetWindowThreadProcessId(window, out owner);
+      if (owner == pid && IsWindowVisible(window)) {
+        ShowWindowAsync(window, 9);
+        SetForegroundWindow(window);
+        return false;
+      }
+      return true;
+    }, IntPtr.Zero);
+  }
+}
+'@
+[TaskboardFocus]::Focus([uint32]$env:CODEX_TASKBOARD_FOCUS_PID)
+`, { ...environment, CODEX_TASKBOARD_FOCUS_PID: String(pid) }, run);
 }

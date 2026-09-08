@@ -172,7 +172,7 @@
 
 .dashboard-view .dashboard-metrics {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   height: 120px;
   gap: 0;
   overflow: hidden;
@@ -223,6 +223,8 @@
   border-left: 0;
 }
 
+.dashboard-view .dashboard-metric.tone-todo { --metric-color: var(--status-todo); }
+.dashboard-view .dashboard-metric.tone-done { --metric-color: var(--status-done); }
 .dashboard-view .dashboard-metric.tone-progress { --metric-color: var(--status-progress); }
 .dashboard-view .dashboard-metric.tone-review { --metric-color: var(--status-review); }
 .dashboard-view .dashboard-metric.tone-blocked,

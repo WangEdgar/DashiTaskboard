@@ -14,3 +14,9 @@ src-tauri/binaries/
 src-tauri/gen/
 src-tauri/resources/
 src-tauri/target/
+
+# Local workspace data and verification artifacts
+.runtime/
+.taskmaster/
+*.sqlite
+*.sqlite-*

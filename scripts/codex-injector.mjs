@@ -33,6 +33,7 @@ import {
 } from "./codex-cdp-pipe.mjs";
 import {
   activateWindowsCodex,
+  focusWindowsCodex,
   stopWindowsCodex,
   windowsCodexProcesses,
   windowsCodexProfileArgument,
@@ -562,6 +563,7 @@ async function stopManagedCodex(record) {
 }
 
 function activateCodexApp(pid) {
+  if (process.platform === "win32") return focusWindowsCodex(pid, withoutTaskboardLauncherEnvironment(process.env));
   if (process.platform !== "darwin") return;
   const activation = spawnSync("/usr/bin/osascript", [
     "-l",
@@ -2784,19 +2786,27 @@ async function resolveRunnableCodexExecutable(appPath) {
     return executable;
   }
 
-  const source = await stat(executable);
   const cacheDirectory = path.join(taskboardDataDirectory, "codex-runtime");
   const cachedExecutable = path.join(cacheDirectory, "codex.exe");
-  try {
-    const cached = await stat(cachedExecutable);
-    if (cached.size === source.size && cached.mtimeMs === source.mtimeMs) {
-      return cachedExecutable;
-    }
-  } catch {}
-
   await mkdir(cacheDirectory, { recursive: true });
-  await pipeline(createReadStream(executable), createWriteStream(cachedExecutable));
-  await utimes(cachedExecutable, source.atime, source.mtime);
+  // Codex starts these sibling executables when an agent calls local tools.
+  // Validate them even when codex.exe itself is already cached.
+  for (const name of [
+    "codex.exe",
+    "codex-code-mode-host.exe",
+    "codex-command-runner.exe",
+    "codex-windows-sandbox-setup.exe",
+  ]) {
+    const sourcePath = path.join(path.dirname(executable), name);
+    const source = await stat(sourcePath);
+    const destination = path.join(cacheDirectory, name);
+    try {
+      const cached = await stat(destination);
+      if (cached.size === source.size && cached.mtimeMs === source.mtimeMs) continue;
+    } catch {}
+    await pipeline(createReadStream(sourcePath), createWriteStream(destination));
+    await utimes(destination, source.atime, source.mtime);
+  }
   return cachedExecutable;
 }
 
@@ -3042,7 +3052,8 @@ async function main() {
         }
         cdpRuntime = tcpCdpRuntime(port);
         codexAppPid = record.pid;
-        options.attachExisting = true;
+        managedCodex = managedCodexProcesses(options.appPath).find((candidate) => candidate.pid === record.pid) ?? null;
+        options.attachExisting = !managedCodex;
         console.log(JSON.stringify({ reusedCodexPid: record.pid, cdpPort: port }));
         return true;
       }

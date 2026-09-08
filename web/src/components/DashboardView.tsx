@@ -404,36 +404,33 @@ export function DashboardView({
     })
     .slice(0, 5);
 
-  const metrics = [
-    {
-      label: taskStatusLabel(language, "in_progress"),
-      value: tasks.filter((task) => task.status === "in_progress").length,
-      tone: "progress",
-    },
-    {
-      label: taskStatusLabel(language, "in_review"),
-      value: tasks.filter((task) => task.status === "in_review").length,
-      tone: "review",
-    },
-    {
-      label: taskStatusLabel(language, "blocked"),
-      value: tasks.filter((task) => task.status === "blocked").length,
-      tone: "blocked",
-    },
-    { label: text("已逾期", "Overdue"), value: overdueTasks.length, tone: "overdue" },
-    {
-      label: taskStatusLabel(language, "backlog"),
-      value: tasks.filter((task) => task.status === "backlog").length,
-      tone: "backlog",
-    },
-  ];
+  const metrics = ([
+    ["backlog", "backlog"],
+    ["todo", "todo"],
+    ["in_progress", "progress"],
+    ["in_review", "review"],
+    ["blocked", "blocked"],
+    ["done", "done"],
+    ["canceled", "canceled"],
+  ] as const).map(([status, tone]) => ({
+    label: taskStatusLabel(language, status),
+    value: tasks.filter((task) => task.status === status).length,
+    tone,
+  }));
 
+  const summaryIsStale = Boolean(projectSummary?.updatedAt && tasks.some(
+    (task) => Date.parse(task.activityUpdatedAt) > Date.parse(projectSummary.updatedAt!),
+  ));
+  const currentStatusSummary = text(
+    `当前共 ${tasks.length} 个任务：${metrics.filter((metric) => metric.value > 0).map((metric) => `${metric.label} ${metric.value} 个`).join("，") || "暂无任务"}。`,
+    `${tasks.length} tasks: ${metrics.filter((metric) => metric.value > 0).map((metric) => `${metric.label}: ${metric.value}`).join(", ") || "No tasks"}.`,
+  );
   const summaryBody = isAllProjects
     ? text(
         `所有项目共有 ${tasks.length} 个议题，${completedTasks.length} 个已完成，${activeTasks.length} 个尚未结束；当前 ${tasks.filter((task) => task.status === "blocked").length} 个遇到阻碍，${overdueTasks.length} 个已逾期。`,
         `Across all projects, ${tasks.length} issues are tracked: ${completedTasks.length} completed and ${activeTasks.length} still open; ${tasks.filter((task) => task.status === "blocked").length} are blocked and ${overdueTasks.length} overdue.`,
       )
-    : projectSummary?.summary
+    : summaryIsStale ? currentStatusSummary : projectSummary?.summary
       ?? (projectSummary?.refreshing
         ? text(
             "Codex 正在整理当前项目的进展、风险和下一步重点…",
@@ -510,8 +507,8 @@ export function DashboardView({
             <div className="dashboard-hero-value">
               <strong>{completionRate}%</strong>
               <span>{text(
-                `${completedTasks.length} 个已完成 · ${activeTasks.length} 个尚未结束`,
-                `${completedTasks.length} completed · ${activeTasks.length} remaining`,
+                `共 ${tasks.length} 个 · ${completedTasks.length} 个已完成 · ${activeTasks.length} 个尚未结束 · ${overdueTasks.length} 个已逾期`,
+                `${tasks.length} total · ${completedTasks.length} completed · ${activeTasks.length} remaining · ${overdueTasks.length} overdue`,
               )}</span>
             </div>
           </header>
@@ -529,7 +526,7 @@ export function DashboardView({
 
         <div className="dashboard-metrics">
           {metrics.map((metric) => {
-            const percent = activeTasks.length ? Math.round((metric.value / activeTasks.length) * 100) : 0;
+            const percent = tasks.length ? Math.round((metric.value / tasks.length) * 100) : 0;
             return (
               <article className={`dashboard-metric tone-${metric.tone}`} key={metric.label}>
                 <span className="dashboard-metric-label">{metric.label}</span>

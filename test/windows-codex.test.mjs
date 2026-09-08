@@ -62,13 +62,17 @@ test("Windows Store activation passes the app, isolated profile, and CDP port th
   assert.match(calls[0].args.at(-1), /--remote-debugging-port=/);
 });
 
-test("Windows Codex cleanup terminates the activated process tree", () => {
+test("Windows Codex cleanup requests normal close and waits without force", () => {
   const calls = [];
   stopWindowsCodex(456, { SAFE: "1" }, (command, args, options) => {
     calls.push({ command, args, options });
     return { status: 0, stdout: "", stderr: "" };
   });
-  assert.deepEqual(calls[0].args, ["/PID", "456", "/T", "/F"]);
+  assert.equal(calls[0].command, "powershell.exe");
+  assert.equal(calls[0].options.env.CODEX_TASKBOARD_STOP_PID, "456");
+  assert.match(calls[0].args.at(-1), /RmShutdown\(session, 0, IntPtr.Zero\)/);
+  assert.match(calls[0].args.at(-1), /WaitForExit\(30000\)/);
+  assert.doesNotMatch(calls[0].args.at(-1), /taskkill|Stop-Process/);
 });
 
 test("Windows managed process discovery keeps only the Electron root", () => {
@@ -79,4 +83,13 @@ test("Windows managed process discovery keeps only the Electron root", () => {
     { pid: 103, parentPid: 101 },
   ];
   assert.deepEqual(windowsRootProcesses(processes), [processes[0]]);
+});
+
+test("Windows Codex close refusal stops restart instead of forcing termination", () => {
+  let calls = 0;
+  assert.throws(() => stopWindowsCodex(456, {}, () => {
+    calls += 1;
+    return { status: 1, stdout: "", stderr: "Codex is still saving; restart canceled" };
+  }), /restart canceled/);
+  assert.equal(calls, 1);
 });

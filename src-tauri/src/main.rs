@@ -73,6 +73,7 @@ use windows::{
     },
 };
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 const LAUNCHER_STOP_TIMEOUT: Duration = Duration::from_secs(36);
@@ -141,6 +142,7 @@ struct LauncherRuntimeDescriptor {
 
 struct LauncherState {
     child: Mutex<Option<u32>>,
+    child_exit: Mutex<Option<(u32, bool)>>,
     snapshot: Mutex<LauncherSnapshot>,
     status_menu: Mutex<Option<MenuItem<tauri::Wry>>>,
     intentional_stop: AtomicBool,
@@ -396,6 +398,7 @@ impl LauncherState {
     ) -> Self {
         Self {
             child: Mutex::new(None),
+            child_exit: Mutex::new(None),
             snapshot: Mutex::new(LauncherSnapshot {
                 phase: "starting".into(),
                 message: "正在启动任务面板…".into(),
@@ -1119,6 +1122,7 @@ fn quit_codex_normally(pid: u32) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 fn find_codex_app(_home_directory: &Path) -> Option<PathBuf> {
     let output = StdCommand::new("powershell.exe")
+        .creation_flags(CREATE_NO_WINDOW.0)
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -1140,6 +1144,7 @@ fn find_codex_app(_home_directory: &Path) -> Option<PathBuf> {
 #[cfg(target_os = "windows")]
 fn ordinary_codex_process(app_path: &Path, codex_profile: &Path) -> Result<Option<u32>, String> {
     let output = StdCommand::new("powershell.exe")
+        .creation_flags(CREATE_NO_WINDOW.0)
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -1328,17 +1333,15 @@ fn process_group_is_running(pid: u32) -> bool {
 
 #[cfg(target_os = "windows")]
 fn process_group_is_running(pid: u32) -> bool {
-    StdCommand::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            &format!(
-                "if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}"
-            ),
-        ])
-        .status()
-        .is_ok_and(|status| status.success())
+    match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) } {
+        Ok(process) => {
+            let running = unsafe { WaitForSingleObject(process, 0) } != WAIT_OBJECT_0;
+            let _ = unsafe { CloseHandle(process) };
+            running
+        }
+        // A nonexistent PID is gone; access errors must not be mistaken for exit.
+        Err(error) => error.code() != windows::core::HRESULT::from_win32(87),
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1405,6 +1408,7 @@ fn terminate_process_group(pid: u32) {
 fn terminate_process_group(pid: u32) {
     if process_group_is_running(pid) {
         let _ = StdCommand::new("taskkill.exe")
+            .creation_flags(CREATE_NO_WINDOW.0)
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .status();
     }
@@ -1443,6 +1447,7 @@ fn process_matches_record(record: &LauncherPidRecord) -> bool {
 #[cfg(target_os = "windows")]
 fn process_matches_record(record: &LauncherPidRecord) -> bool {
     let output = StdCommand::new("powershell.exe")
+        .creation_flags(CREATE_NO_WINDOW.0)
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -1461,16 +1466,20 @@ fn process_matches_record(record: &LauncherPidRecord) -> bool {
         && command.contains(r"scripts\codex-injector.mjs")
 }
 
-fn stop_recorded_child(state: &LauncherState) {
+fn stop_recorded_child(state: &LauncherState) -> Result<(), String> {
     let record = fs::read_to_string(&state.pid_record_path)
         .ok()
         .and_then(|content| serde_json::from_str::<LauncherPidRecord>(&content).ok());
     if let Some(record) = record {
         if process_matches_record(&record) {
+            #[cfg(target_os = "windows")]
+            return Err("已有任务面板仍在运行，请先正常退出；本次不会强制结束 Codex。".into());
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             stop_launcher_process_group(record.pid);
         }
     }
     let _ = fs::remove_file(&state.pid_record_path);
+    Ok(())
 }
 
 fn write_pid_record(
@@ -1498,21 +1507,53 @@ fn clear_pid_record(state: &LauncherState, pid: u32) {
     }
 }
 
-fn stop_managed_child_locked(app: &AppHandle, state: &Arc<LauncherState>) {
+fn stop_managed_child_locked(app: &AppHandle, state: &Arc<LauncherState>) -> Result<(), String> {
     state.generation.fetch_add(1, Ordering::SeqCst);
     state.intentional_stop.store(true, Ordering::SeqCst);
     #[cfg(target_os = "windows")]
-    if let Some(mut control) = state.child_control.lock().unwrap().take() {
-        let _ = control.write_all(b"stop\n").and_then(|_| control.flush());
+    if let Some(control) = state.child_control.lock().unwrap().as_mut() {
+        control.write_all(b"stop\n").and_then(|_| control.flush())
+            .map_err(|error| {
+                state.intentional_stop.store(false, Ordering::SeqCst);
+                format!("无法请求正常退出，已取消重启：{error}")
+            })?;
     }
-    if let Some(pid) = state.child.lock().unwrap().take() {
+    let child_pid = *state.child.lock().unwrap();
+    if let Some(pid) = child_pid {
         append_log(state, &format!("Stopping launcher child {pid}"));
         #[cfg(target_os = "windows")]
-        if !wait_for_process_group_exit(pid, STOP_TIMEOUT) {
-            terminate_process_group(pid);
+        {
+            let deadline = Instant::now() + LAUNCHER_STOP_TIMEOUT;
+            let success = loop {
+                if let Some((exited_pid, success)) = *state.child_exit.lock().unwrap() {
+                    if exited_pid == pid { break success; }
+                }
+                if Instant::now() >= deadline {
+                    state.intentional_stop.store(false, Ordering::SeqCst);
+                    return Err("Codex 尚未正常退出，已取消重启以保留对话。".into());
+                }
+                thread::sleep(Duration::from_millis(100));
+            };
+            if !success {
+                state.child.lock().unwrap().take();
+                state.child_control.lock().unwrap().take();
+                clear_pid_record(state, pid);
+                state.intentional_stop.store(false, Ordering::SeqCst);
+                let message = "Codex 正常退出失败，重启已取消。请查看启动器日志。";
+                update_snapshot(app, state, |snapshot| {
+                    snapshot.phase = "error".into();
+                    snapshot.message = message.into();
+                    snapshot.child_pid = None;
+                    snapshot.open_signal_pid = None;
+                });
+                return Err(message.into());
+            }
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         stop_launcher_process_group(pid);
+        state.child.lock().unwrap().take();
+        #[cfg(target_os = "windows")]
+        state.child_control.lock().unwrap().take();
         clear_pid_record(state, pid);
     }
     update_snapshot(app, state, |snapshot| {
@@ -1521,11 +1562,14 @@ fn stop_managed_child_locked(app: &AppHandle, state: &Arc<LauncherState>) {
         snapshot.child_pid = None;
         snapshot.open_signal_pid = None;
     });
+    Ok(())
 }
 
 fn stop_managed_child(app: &AppHandle, state: &Arc<LauncherState>) {
     let _lifecycle = state.lifecycle.lock().unwrap();
-    stop_managed_child_locked(app, state);
+    if let Err(error) = stop_managed_child_locked(app, state) {
+        append_log(state, &error);
+    }
 }
 
 fn watch_launcher_output<R: std::io::Read + Send + 'static>(
@@ -1629,7 +1673,7 @@ fn start_launcher_locked(
             "node"
         });
     let codex_profile = state.data_directory.join("codex-profile");
-    stop_recorded_child(state);
+    stop_recorded_child(state)?;
     #[cfg(target_os = "macos")]
     let ordinary_codex_pid = ordinary_codex_process(&codex_app)?;
     #[cfg(target_os = "windows")]
@@ -1775,6 +1819,7 @@ fn start_launcher_locked(
     }
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
+    *state.child_exit.lock().unwrap() = None;
     *state.child.lock().unwrap() = Some(pid);
     #[cfg(target_os = "windows")]
     {
@@ -1808,6 +1853,7 @@ fn start_launcher_locked(
     let event_state = state.clone();
     thread::spawn(move || {
         let status = child.wait();
+        *event_state.child_exit.lock().unwrap() = Some((pid, status.as_ref().is_ok_and(|exit| exit.success())));
         let recovery_token = {
             let mut current_child = event_state.child.lock().unwrap();
             if *current_child != Some(pid) {
@@ -1909,6 +1955,71 @@ fn start_launcher(app: &AppHandle, state: &Arc<LauncherState>) -> Result<Launche
     start_launcher_locked(app, state)
 }
 
+fn show_restart_progress(app: &AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("restart-progress") {
+        window.show().map_err(|e| e.to_string())?;
+        let _ = window.set_focus();
+        return Ok(());
+    }
+    let html = serde_json::to_string(include_str!("restart-progress.html")).unwrap();
+    let window = tauri::WebviewWindowBuilder::new(
+        app, "restart-progress", tauri::WebviewUrl::External("about:blank".parse().unwrap()),
+    )
+    .title("Codex Taskboard · 重新打开 Codex")
+    .inner_size(480.0, 440.0).min_inner_size(420.0, 400.0).center()
+    .initialization_script(format!(
+        "document.addEventListener('DOMContentLoaded',()=>{{document.open();document.write({html});document.close();}},{{once:true}});"
+    ))
+    .build().map_err(|e| e.to_string())?;
+    let hidden_window = window.clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let _ = hidden_window.hide();
+        }
+    });
+    Ok(())
+}
+
+fn restart_progress(app: &AppHandle, step: usize, message: &str, result: &str) {
+    if let Some(window) = app.get_webview_window("restart-progress") {
+        let payload = serde_json::json!({"step":step,"message":message,"result":result});
+        let _ = window.eval(format!("window.__restartProgress={payload};window.renderRestart?.(window.__restartProgress)"));
+    }
+}
+
+fn restart_with_progress(app: &AppHandle, state: &Arc<LauncherState>) -> Result<(), String> {
+    show_restart_progress(app)?;
+    restart_progress(app, 0, "正在请求正常退出…", "");
+    let result: Result<(), String> = (|| {
+        restart_launcher(app, state)?;
+        let deadline = Instant::now() + Duration::from_secs(90);
+        loop {
+            let snapshot = state.snapshot.lock().unwrap().clone();
+            if snapshot.phase == "running" {
+                restart_progress(app, 3, "Codex 已打开，任务板已连接。", "success");
+                return Ok(());
+            }
+            if snapshot.phase == "error" || snapshot.phase == "stopped" {
+                return Err(snapshot.message);
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("等待任务板就绪超时。{}\n可关闭此窗口查看 Codex；详细原因已记录在启动器日志中。", snapshot.message));
+            }
+            restart_progress(app, 3, &snapshot.message, "");
+            thread::sleep(Duration::from_millis(250));
+        }
+    })();
+    if let Err(error) = &result {
+        append_log(state, &format!("Restart failed: {error}"));
+        if let Some(window) = app.get_webview_window("restart-progress") {
+            let message = serde_json::to_string(error).unwrap();
+            let _ = window.eval(format!("window.restartError?.({message})"));
+        }
+    }
+    result
+}
+
 fn restart_launcher(
     app: &AppHandle,
     state: &Arc<LauncherState>,
@@ -1922,7 +2033,9 @@ fn restart_launcher(
             append_log(state, "Launcher reopen ignored during update installation");
             return Ok(state.snapshot.lock().unwrap().clone());
         }
-        stop_managed_child_locked(app, state);
+        restart_progress(app, 1, "等待 Codex 正常退出，最长约 36 秒。", "");
+        stop_managed_child_locked(app, state)?;
+        restart_progress(app, 2, "正在启动 Codex…", "");
         let result = start_launcher_locked(app, state);
         state.intentional_stop.store(false, Ordering::SeqCst);
         let generation = state.generation.load(Ordering::SeqCst);
@@ -2267,7 +2380,10 @@ fn install_update(
         if state.intentional_stop.load(Ordering::SeqCst) {
             return Err("App exit is in progress".into());
         }
-        stop_managed_child_locked(app, state);
+        if let Err(error) = stop_managed_child_locked(app, state) {
+            state.update_in_progress.store(false, Ordering::SeqCst);
+            return Err(error);
+        }
     }
     if let Err(error) = update.install(bytes) {
         append_log(state, &format!("Update installation failed: {error}"));
@@ -2660,16 +2776,14 @@ fn main() {
                         let state = Arc::clone(state.inner());
                         let app = app.clone();
                         tauri::async_runtime::spawn_blocking(move || {
-                            if let Err(error) = restart_launcher(&app, &state) {
+                            if let Err(error) = restart_with_progress(&app, &state) {
                                 append_log(
                                     &state,
                                     &format!("Launcher menu restart failed: {error}"),
                                 );
-                                show_error_dialog(
-                                    &app,
-                                    "Codex Taskboard 启动失败",
-                                    &format!("{error}\n\n请确认官方 Codex/ChatGPT App 已安装。"),
-                                );
+                                if app.get_webview_window("restart-progress").is_none() {
+                                    show_error_dialog(&app, "无法显示重启进度", &error);
+                                }
                             }
                         });
                     }
@@ -2714,7 +2828,11 @@ fn main() {
                         if state.update_in_progress.load(Ordering::SeqCst) {
                             return;
                         }
-                        stop_managed_child_locked(app, &state);
+                        if let Err(error) = stop_managed_child_locked(app, &state) {
+                            drop(lifecycle);
+                            show_error_dialog(app, "无法正常退出 Codex", &error);
+                            return;
+                        }
                         drop(lifecycle);
                         app.exit(0);
                     }
@@ -2812,7 +2930,10 @@ fn main() {
                     api.prevent_exit();
                     return;
                 }
-                stop_managed_child_locked(app_handle, &state);
+                if let Err(error) = stop_managed_child_locked(app_handle, &state) {
+                    append_log(&state, &error);
+                    api.prevent_exit();
+                }
             }
         }
         tauri::RunEvent::Exit => {
@@ -2826,4 +2947,27 @@ fn main() {
         }
         _ => {}
     });
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_process_wait_tests {
+    use super::*;
+
+    #[test]
+    fn native_poll_tracks_running_and_exited_child() {
+        let mut child = StdCommand::new("cmd.exe")
+            .args(["/D", "/C", "more"])
+            .creation_flags(CREATE_NO_WINDOW.0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn().unwrap();
+        let pid = child.id();
+        assert!(process_group_is_running(pid));
+        assert!(!wait_for_process_group_exit(pid, Duration::from_millis(200)));
+        drop(child.stdin.take());
+        assert!(wait_for_process_group_exit(pid, Duration::from_secs(5)));
+        assert!(child.wait().unwrap().success());
+        assert!(!process_group_is_running(pid));
+    }
 }
