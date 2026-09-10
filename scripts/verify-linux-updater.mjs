@@ -19,6 +19,7 @@ if (!debPath || !appImagePath || !latestPath || !releaseTag) {
 }
 
 const packageJson = JSON.parse(await readFile(path.join(projectRoot, "package.json"), "utf8"));
+const releaseRepository = process.env.GITHUB_REPOSITORY || "WangEdgar/DashiTaskboard";
 const tauriConfig = JSON.parse(await readFile(
   path.join(projectRoot, "src-tauri", "tauri.conf.json"),
   "utf8",
@@ -50,7 +51,7 @@ for (const [platformKey, artifactPath] of [
     signature,
   });
 
-  const expectedUrl = `https://github.com/chuspeeism/dashi-taskboard/releases/download/${releaseTag}/${path.basename(artifactPath)}`;
+  const expectedUrl = `https://github.com/${releaseRepository}/releases/download/${releaseTag}/${path.basename(artifactPath)}`;
   const platform = latest.platforms?.[platformKey];
   if (platform?.url !== expectedUrl || platform.signature !== signature) {
     throw new Error(`latest.json ${platformKey} updater entry is incorrect`);

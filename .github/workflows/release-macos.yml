@@ -288,8 +288,8 @@ jobs:
           path: ${{ runner.temp }}/linux-release
           if-no-files-found: error
 
-  release-windows-preview:
-    name: Build unsigned Windows x64 Preview
+  release-windows:
+    name: Build Windows x64 package and updater
     needs: release-preflight
     runs-on: windows-2025
     timeout-minutes: 40
@@ -323,14 +323,31 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build unsigned Windows x64 Preview
-        run: npm run app:build:windows
+      - name: Build Windows x64 package and updater
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: >-
+          npm run app:build:windows --
+          --config '{"bundle":{"createUpdaterArtifacts":true}}'
 
-      - name: Preserve unsigned Windows x64 Preview
+      - name: Stage Windows x64 release assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $packageVersion = node -p "require('./package.json').version"
+          $releaseRoot = Join-Path $env:RUNNER_TEMP "windows-release"
+          New-Item -ItemType Directory -Force -Path $releaseRoot | Out-Null
+          Copy-Item -LiteralPath (Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis" -Filter "*-setup.exe" | Select-Object -First 1).FullName -Destination (Join-Path $releaseRoot "Codex.Taskboard_${packageVersion}_NSIS-x64-unsigned.exe")
+          Copy-Item -LiteralPath (Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis" -Filter "*.nsis.zip" | Select-Object -First 1).FullName -Destination (Join-Path $releaseRoot "Codex.Taskboard_${packageVersion}_NSIS-x64.nsis.zip")
+          Copy-Item -LiteralPath (Get-ChildItem -Path "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis" -Filter "*.nsis.zip.sig" | Select-Object -First 1).FullName -Destination (Join-Path $releaseRoot "Codex.Taskboard_${packageVersion}_NSIS-x64.nsis.zip.sig")
+          Copy-Item -LiteralPath "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/latest.json" -Destination (Join-Path $releaseRoot "windows-latest.json")
+
+      - name: Preserve Windows x64 release assets
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: windows-preview-${{ github.sha }}
-          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+          name: windows-release-${{ github.sha }}
+          path: ${{ runner.temp }}/windows-release
           if-no-files-found: error
 
   release-macos:
@@ -532,7 +549,7 @@ jobs:
     needs:
       - release-preflight
       - release-linux
-      - release-windows-preview
+      - release-windows
       - release-macos
     runs-on: ubuntu-24.04
     env:
@@ -557,11 +574,11 @@ jobs:
           name: macos-release-${{ github.sha }}
           path: ${{ runner.temp }}/macos-release
 
-      - name: Restore unsigned Windows x64 Preview
+      - name: Restore Windows x64 release assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: windows-preview-${{ github.sha }}
-          path: ${{ runner.temp }}/windows-preview
+          name: windows-release-${{ github.sha }}
+          path: ${{ runner.temp }}/windows-release
 
       - name: Restore Ubuntu 24.04 x64 release assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -579,8 +596,8 @@ jobs:
           jq \
             --rawfile deb_signature "$LINUX_DEB.sig" \
             --rawfile appimage_signature "$LINUX_APPIMAGE.sig" \
-            --arg deb_url "https://github.com/chuspeeism/dashi-taskboard/releases/download/$RELEASE_TAG/$LINUX_DEB_NAME" \
-            --arg appimage_url "https://github.com/chuspeeism/dashi-taskboard/releases/download/$RELEASE_TAG/$LINUX_APPIMAGE_NAME" \
+            --arg deb_url "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$LINUX_DEB_NAME" \
+            --arg appimage_url "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$LINUX_APPIMAGE_NAME" \
             '.platforms["linux-x86_64-deb"] = {signature: $deb_signature, url: $deb_url}
              | .platforms["linux-x86_64-appimage"] = {signature: $appimage_signature, url: $appimage_url}' \
             "$LATEST_PATH" > "$LATEST_PATH.linux"
@@ -588,6 +605,22 @@ jobs:
           node scripts/verify-linux-updater.mjs \
             "$LINUX_DEB" \
             "$LINUX_APPIMAGE" \
+            "$LATEST_PATH" \
+            "$RELEASE_TAG"
+
+      - name: Add and verify the Windows x64 updater
+        run: |
+          LATEST_PATH="$RUNNER_TEMP/macos-release/latest.json"
+          WINDOWS_UPDATER_NAME="Codex.Taskboard_${PACKAGE_VERSION}_NSIS-x64.nsis.zip"
+          WINDOWS_UPDATER="$RUNNER_TEMP/windows-release/$WINDOWS_UPDATER_NAME"
+          jq \
+            --rawfile windows_signature "$WINDOWS_UPDATER.sig" \
+            --arg windows_url "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$WINDOWS_UPDATER_NAME" \
+            '.platforms["windows-x86_64"] = {signature: $windows_signature, url: $windows_url}' \
+            "$LATEST_PATH" > "$LATEST_PATH.windows"
+          mv "$LATEST_PATH.windows" "$LATEST_PATH"
+          node scripts/verify-windows-updater.mjs \
+            "$WINDOWS_UPDATER" \
             "$LATEST_PATH" \
             "$RELEASE_TAG"
 
@@ -603,8 +636,14 @@ jobs:
           cp "$MACOS_RELEASE/Codex.Taskboard_${PACKAGE_VERSION}_universal.app.tar.gz.sig" "$RELEASE_ASSETS/"
           cp "$MACOS_RELEASE/latest.json" "$RELEASE_ASSETS/"
           cp \
-            "$RUNNER_TEMP/windows-preview/"*-setup.exe \
+            "$RUNNER_TEMP/windows-release/Codex.Taskboard_${PACKAGE_VERSION}_NSIS-x64-unsigned.exe" \
             "$RELEASE_ASSETS/Codex.Taskboard_${PACKAGE_VERSION}_NSIS-x64-unsigned.exe"
+          cp \
+            "$RUNNER_TEMP/windows-release/Codex.Taskboard_${PACKAGE_VERSION}_NSIS-x64.nsis.zip" \
+            "$RELEASE_ASSETS/"
+          cp \
+            "$RUNNER_TEMP/windows-release/Codex.Taskboard_${PACKAGE_VERSION}_NSIS-x64.nsis.zip.sig" \
+            "$RELEASE_ASSETS/"
           cp \
             "$RUNNER_TEMP/linux-release/Codex.Taskboard_${PACKAGE_VERSION}_Ubuntu-24.04-x64.deb" \
             "$RELEASE_ASSETS/"
@@ -626,6 +665,8 @@ jobs:
               "Codex.Taskboard_${PACKAGE_VERSION}_Ubuntu-24.04-x64.AppImage" \
               "Codex.Taskboard_${PACKAGE_VERSION}_Ubuntu-24.04-x64.AppImage.sig" \
               "Codex.Taskboard_${PACKAGE_VERSION}_NSIS-x64-unsigned.exe" \
+              "Codex.Taskboard_${PACKAGE_VERSION}_NSIS-x64.nsis.zip" \
+              "Codex.Taskboard_${PACKAGE_VERSION}_NSIS-x64.nsis.zip.sig" \
               "Codex.Taskboard_${PACKAGE_VERSION}_universal.app.tar.gz" \
               "Codex.Taskboard_${PACKAGE_VERSION}_universal.app.tar.gz.sig" \
               "latest.json" > "$MANIFEST_ROOT/release-assets.sha256"
@@ -667,6 +708,8 @@ jobs:
             "$RELEASE_ASSETS/Codex.Taskboard_${PACKAGE_VERSION}_Ubuntu-24.04-x64.AppImage" \
             "$RELEASE_ASSETS/Codex.Taskboard_${PACKAGE_VERSION}_Ubuntu-24.04-x64.AppImage.sig" \
             "$RELEASE_ASSETS/Codex.Taskboard_${PACKAGE_VERSION}_NSIS-x64-unsigned.exe" \
+            "$RELEASE_ASSETS/Codex.Taskboard_${PACKAGE_VERSION}_NSIS-x64.nsis.zip" \
+            "$RELEASE_ASSETS/Codex.Taskboard_${PACKAGE_VERSION}_NSIS-x64.nsis.zip.sig" \
             "$RELEASE_ASSETS/Codex.Taskboard_${PACKAGE_VERSION}_universal.app.tar.gz" \
             "$RELEASE_ASSETS/Codex.Taskboard_${PACKAGE_VERSION}_universal.app.tar.gz.sig" \
             "$RELEASE_ASSETS/latest.json"
