@@ -62,15 +62,16 @@ test("release signing is tag-only and PR CI builds the real unsigned app bundle"
   assert.match(checkWorkflow, /--no-sign/);
 });
 
-test("Windows CI runs the Node suite and the unsigned launcher skips unsupported updates", () => {
+test("Windows CI runs the Node suite and release builds updater artifacts", () => {
   assert.match(
     checkWorkflow,
     /windows-launcher:[\s\S]*?run: npm test[\s\S]*?run: npm run app:build:windows/,
   );
-  assert.match(
-    launcherSource,
-    /cfg!\(target_os = "windows"\)[\s\S]*?Windows 版本暂不支持自动更新/,
-  );
+  assert.doesNotMatch(launcherSource, /Windows 版本暂不支持自动更新/);
+  assert.match(releaseWorkflow, /release-windows:[\s\S]*?createUpdaterArtifacts/);
+  assert.match(releaseWorkflow, /windows-x86_64/);
+  assert.match(releaseWorkflow, /Codex\.Taskboard_\$\{PACKAGE_VERSION\}_NSIS-x64\.nsis\.zip/);
+  assert.match(releaseWorkflow, /verify-windows-updater\.mjs/);
 });
 
 test("Windows CI uploads the NSIS installer with the pinned Node 24 artifact action", () => {

@@ -78,7 +78,7 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const LAUNCHER_STOP_TIMEOUT: Duration = Duration::from_secs(36);
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const BETA_UPDATER_ENDPOINT: &str =
-    "https://raw.githubusercontent.com/chuspeeism/dashi-taskboard/beta-updater/latest.json";
+    "https://raw.githubusercontent.com/WangEdgar/DashiTaskboard/beta-updater/latest.json";
 // Unique whole-directory snapshots shipped from app-v0.2.0 through v1.1.2.
 const KNOWN_TASKBOARD_SKILL_DIGESTS: [&str; 6] = [
     "eeaaa5d71a2c47688bf62a5eb9f45e9138fe49eb636a46cfd6af8a0f8853e2e0",
@@ -2330,17 +2330,6 @@ async fn offer_update(
     quit: &MenuItem<tauri::Wry>,
     show_current_version: bool,
 ) {
-    if cfg!(target_os = "windows") {
-        update_snapshot(app, state, |snapshot| {
-            snapshot.update_message = "Windows 版本暂不支持自动更新。".into();
-            snapshot.update_available = false;
-        });
-        check_update
-            .set_text("检查更新（Windows 暂不支持）")
-            .unwrap();
-        check_update.set_enabled(false).unwrap();
-        return;
-    }
     if show_current_version {
         if state
             .update_flow_in_progress

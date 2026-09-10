@@ -28,6 +28,7 @@ if (!appPath || !dmgPath || !releaseDirectory || !releaseTag) {
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageJson = JSON.parse(await readFile(path.join(projectRoot, "package.json"), "utf8"));
+const releaseRepository = process.env.GITHUB_REPOSITORY || "WangEdgar/DashiTaskboard";
 const tauriConfig = JSON.parse(await readFile(
   path.join(projectRoot, "src-tauri", "tauri.conf.json"),
   "utf8",
@@ -159,7 +160,7 @@ await verifyUpdaterSignature({
 
 const latest = JSON.parse(await readFile(path.join(releaseDirectory, "latest.json"), "utf8"));
 if (latest.version !== releaseVersion) throw new Error("latest.json version is incorrect");
-const expectedUrl = `https://github.com/chuspeeism/dashi-taskboard/releases/download/${releaseTag}/${artifactName}`;
+const expectedUrl = `https://github.com/${releaseRepository}/releases/download/${releaseTag}/${artifactName}`;
 const expectedPlatforms = [
   "darwin-aarch64",
   "darwin-x86_64",

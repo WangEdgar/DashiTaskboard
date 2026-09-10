@@ -17,6 +17,7 @@ if (!appPath || !outputDirectory || !releaseTag) {
 
 const packageJson = JSON.parse(await readFile(path.join(projectRoot, "package.json"), "utf8"));
 const stableTag = `v${packageJson.version}`;
+const releaseRepository = process.env.GITHUB_REPOSITORY || "WangEdgar/DashiTaskboard";
 const betaPrefix = `${stableTag}-beta.`;
 const betaNumber = releaseTag.startsWith(betaPrefix)
   ? releaseTag.slice(betaPrefix.length)
@@ -42,7 +43,7 @@ run("/usr/bin/tar", ["-czf", artifactPath, path.basename(appPath)], {
 run(path.join(projectRoot, "node_modules", ".bin", "tauri"), ["signer", "sign", artifactPath]);
 
 const signature = await readFile(`${artifactPath}.sig`, "utf8");
-const downloadUrl = `https://github.com/chuspeeism/dashi-taskboard/releases/download/${releaseTag}/${artifactName}`;
+const downloadUrl = `https://github.com/${releaseRepository}/releases/download/${releaseTag}/${artifactName}`;
 const platform = { signature, url: downloadUrl };
 const latest = {
   version: releaseVersion,
