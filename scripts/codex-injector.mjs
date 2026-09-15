@@ -1334,6 +1334,12 @@ function eligibleRemoteAutomationTask(task) {
     && (task.relations?.blockedBy ?? []).every((dependency) => dependency.status === "done");
 }
 
+function runnableTaskboardAutomationTask(task) {
+  return task?.status === "todo"
+    && task.archivedAt === null
+    && (task.relations?.blockedBy ?? []).every((dependency) => dependency.status === "done");
+}
+
 async function projectManagerCoordinationEnabled(projectId) {
   try {
     const response = await taskboardRequest(`/api/projects/${encodeURIComponent(projectId)}/coordination`);
@@ -1770,7 +1776,10 @@ async function applyTaskboardAutomationPolicy(
     throw new Error("Taskboard todo check returned invalid JSON");
   }
   const hasTodo = todoPayload ? todoPayload.tasks.length > 0 : null;
-  const quota = request.quotaAware && hasTodo !== false
+  const hasRunnableTodo = todoPayload
+    ? todoPayload.tasks.some(runnableTaskboardAutomationTask)
+    : null;
+  const quota = request.quotaAware && hasRunnableTodo !== false
     ? await readCodexQuotaStatus(request.model)
     : null;
   if (!stillCurrent()) return { quota, stale: true };
@@ -1782,7 +1791,7 @@ async function applyTaskboardAutomationPolicy(
     const currentItem = remoteAutomationItem(request, currentStatus, remoteNextRunAt);
     const operation = taskboardAutomationPolicyOperation(request, {
       explicit,
-      hasTodo,
+      hasTodo: hasRunnableTodo,
       previousQuotaState,
       quotaState: quota?.state,
       currentStatus,
@@ -1804,6 +1813,7 @@ async function applyTaskboardAutomationPolicy(
       items: [item],
       operation,
       hasTodo,
+      hasRunnableTodo,
       ...(quota ? { quota } : {}),
     };
   }
@@ -1820,7 +1830,7 @@ async function applyTaskboardAutomationPolicy(
   }
   const operation = taskboardAutomationPolicyOperation(request, {
     explicit,
-    hasTodo,
+    hasTodo: hasRunnableTodo,
     previousQuotaState,
     quotaState: quota?.state,
     currentStatus: currentItem?.status,
@@ -1829,9 +1839,9 @@ async function applyTaskboardAutomationPolicy(
     ? { item: currentItem, items: listed.items }
     : await reconcileTaskboardAutomation({ ...request, operation }, rpc);
   if (result?.error === "not-found") {
-    return { operation, hasTodo, ...(quota ? { quota } : {}) };
+    return { operation, hasTodo, hasRunnableTodo, ...(quota ? { quota } : {}) };
   }
-  return { ...result, operation, hasTodo, ...(quota ? { quota } : {}) };
+  return { ...result, operation, hasTodo, hasRunnableTodo, ...(quota ? { quota } : {}) };
 }
 
 function storedAutomationPolicy(request) {

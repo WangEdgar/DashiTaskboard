@@ -68,6 +68,16 @@ test("remote auto-claim skips projects managed by fixed manager coordination", (
   );
 });
 
+test("automation policy uses runnable todo tasks instead of blocked todo count", () => {
+  const source = fs.readFileSync(
+    fileURLToPath(new URL("../scripts/codex-injector.mjs", import.meta.url)),
+    "utf8",
+  );
+  assert.match(source, /function runnableTaskboardAutomationTask/);
+  assert.match(source, /hasRunnableTodo = todoPayload[\s\S]*tasks\.some\(runnableTaskboardAutomationTask\)/);
+  assert.match(source, /hasTodo: hasRunnableTodo/);
+});
+
 test("the automation host request accepts catalog-provided project automation options", () => {
   assert.deepEqual(parseTaskboardAutomationHostRequest(baseRequest), baseRequest);
   assert.equal(
