@@ -11,6 +11,7 @@ const isBusy = (thread) => thread?.status?.type === "active"
   || thread?.turns?.some((turn) => turn.status === "inProgress" || turn.status === "in_progress");
 const taskVersionMap = (tasks) => Object.fromEntries(tasks.map((task) => [task.id, task.version]));
 const quote = (value) => "'" + String(value).replaceAll("'", "''") + "'";
+const waitPattern = /(?:请|暂时|暂不|先|需要).{0,8}(?:暂停|等待|不要执行|不要开发)|等待(?:确认|确定|验收|通知)|on hold|do not (?:start|implement)/i;
 
 export function managerCliPrefix(runtimeFile) {
   const cli = fileURLToPath(new URL("../cli/taskctl.mjs", import.meta.url));
@@ -209,17 +210,25 @@ export function createProjectManagerCoordinator({ request, rpc, runtimeFile, dis
         }
       }
       if (manager.id === "general") continue;
-      const queued = assignments.find((item) => item.managerId === manager.id && item.state === "queued");
-      if (!queued) continue;
-      const group = tasks.filter((task) => queued.taskIds.includes(task.id));
-      if (group.length !== queued.taskIds.length || group.some((task) => task.status !== "in_progress" || task.threadBinding?.threadId !== manager.threadId)) {
-        await updateRuntime(projectId, { managerId: manager.id, assignmentId: queued.id, state: "waiting_user", message: "任务状态或绑定已变化，等待总经理重新核对。" });
+      const runnable = assignments.find((item) => {
+        if (item.managerId !== manager.id) return false;
+        if (item.state === "queued") return true;
+        return ["running", "waiting_user", "blocked", "interrupted"].includes(item.state);
+      });
+      if (!runnable) continue;
+      const group = tasks.filter((task) => runnable.taskIds.includes(task.id));
+      if (group.length !== runnable.taskIds.length || group.some((task) => (
+        task.status !== "in_progress"
+        || task.threadBinding?.threadId !== manager.threadId
+        || waitPattern.test((task.description ?? "") + "\n" + (task.coordinationComments.at(-1)?.body ?? ""))
+      ))) {
+        await updateRuntime(projectId, { managerId: manager.id, assignmentId: runnable.id, state: "waiting_user", message: "任务状态、绑定或最新评论要求等待，暂停唤醒业务经理。" });
         continue;
       }
-      const fingerprint = hash([queued.id, queued.updatedAt, taskFingerprint(group)]);
+      const fingerprint = hash([runnable.id, runnable.updatedAt, taskFingerprint(group)]);
       if (runtime.fingerprint === fingerprint) continue;
-      try { await startTurn(project, manager.id, manager, fingerprint, group, queued); }
-      catch (error) { await updateRuntime(projectId, { managerId: manager.id, assignmentId: queued.id, state: "interrupted", message: error.message }); }
+      try { await startTurn(project, manager.id, manager, fingerprint, group, runnable); }
+      catch (error) { await updateRuntime(projectId, { managerId: manager.id, assignmentId: runnable.id, state: "interrupted", message: error.message }); }
     }
     const general = threads.get("general");
     if (!general || isBusy(general.thread)) return;
@@ -227,7 +236,7 @@ export function createProjectManagerCoordinator({ request, rpc, runtimeFile, dis
     const relevant = tasks.filter((task) => {
       if (task.source === "jira" || task.relations?.blockedBy?.some(item => item.status !== "done")) return false;
       const lastComment = task.coordinationComments.at(-1)?.body ?? "";
-      if (/(?:请|暂时|暂不|先|需要).{0,8}(?:暂停|等待|不要执行|不要开发)|等待(?:确认|确定|验收|通知)|on hold|do not (?:start|implement)/i.test((task.description ?? "") + "\n" + lastComment)) return false;
+      if (waitPattern.test((task.description ?? "") + "\n" + lastComment)) return false;
       const assignment = (latest.assignments ?? []).find(item => item.taskIds.includes(task.id));
       const bound = task.threadBinding?.threadId ?? task.threadId;
       if (!assignment) return task.status === "todo" && (!bound || bound === general.manager.threadId);

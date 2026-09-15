@@ -46,3 +46,73 @@ test('general manager receives allocation changes only, including after schedule
   await coordinator.tick();
   assert.equal(sent.length, 3);
 });
+
+test('in-progress comments wake the assigned business manager without creating a new thread', async () => {
+  const workerThread = { id: 'worker', cwd: '/fixture', status: { type: 'idle' }, turns: [{ id: 'turn-1', status: 'completed' }] };
+  const doc = {
+    config: {
+      enabled: true,
+      version: 1,
+      projectIdentity: { workspacePath: '/fixture', codexHostId: 'local' },
+      generalManager: { name: 'GM', threadId: 'gm' },
+      businessManagers: [{ id: 'feature', name: 'Feature manager', scope: 'feature', threadId: 'worker' }],
+    },
+    runtime: { feature: { state: 'idle', threadId: 'worker', fingerprint: 'old' } },
+    assignments: [{
+      id: 'group',
+      taskIds: ['a'],
+      managerId: 'feature',
+      claimantThreadId: 'gm',
+      executorThreadId: 'worker',
+      state: 'waiting_user',
+      updatedAt: '2026-09-15T00:00:00.000Z',
+    }],
+  };
+  const tasks = [{
+    id: 'a',
+    status: 'in_progress',
+    title: 'a',
+    description: 'Implement the feature',
+    version: 3,
+    threadBinding: { threadId: 'worker' },
+    relations: { blockedBy: [] },
+  }];
+  const comments = [{ id: 'c1', version: 1, body: '请按这个补充要求继续处理', authorType: 'user' }];
+  const sent = [];
+  const created = [];
+  const request = async (url, options) => {
+    if (url === '/api/local/coordination') return { projects: [{ projectId: 'p', ...structuredClone(doc) }] };
+    if (url.endsWith('/runtime')) {
+      doc.runtime[options.body.managerId] = { ...doc.runtime[options.body.managerId], ...options.body };
+      const assignment = doc.assignments.find(item => item.id === options.body.assignmentId);
+      if (assignment && options.body.state) assignment.state = options.body.state;
+      return {};
+    }
+    if (url.endsWith('/coordination')) return structuredClone(doc);
+    if (url.startsWith('/api/tasks?')) return { tasks: structuredClone(tasks) };
+    if (url.endsWith('/comments')) return { comments: structuredClone(comments) };
+    if (url.endsWith('/attachments')) return { attachments: [] };
+    throw Error(url);
+  };
+  const rpc = async (_host, method, params) => {
+    if (method === 'thread/start') {
+      created.push(params);
+      return { thread: { id: 'new-thread', cwd: '/fixture' } };
+    }
+    if (method === 'turn/start') {
+      sent.push(params);
+      return { turn: { id: 'turn-2' } };
+    }
+    if (params?.threadId === 'worker') return { thread: workerThread };
+    return { thread: { id: 'gm', cwd: '/fixture', status: { type: 'idle' }, turns: [] } };
+  };
+
+  const coordinator = createProjectManagerCoordinator({ request, rpc, runtimeFile: '/fixture/runtime.json' });
+  await coordinator.tick();
+
+  assert.equal(created.length, 0);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].threadId, 'worker');
+  assert.match(sent[0].input[0].text, /你是被总经理分派的业务经理/);
+  assert.doesNotMatch(sent[0].input[0].text, /你是项目总经理/);
+});
