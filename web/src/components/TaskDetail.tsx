@@ -95,6 +95,7 @@ import { buildIssueUrl } from "../issueRoute";
 import { postEmbeddedHostMessage } from "../embeddedHost.mjs";
 import copyIdIcon from "../assets/figma-taskboard/copy-id.svg";
 import copyLinkIcon from "../assets/figma-taskboard/copy-link.svg";
+import { TaskCoordination } from "./ProjectCoordination";
 import { DescriptionDocument } from "./DescriptionDocument";
 
 type TaskDetailError = string | readonly [string, string];
@@ -1199,6 +1200,8 @@ export function TaskDetail({
                 </div>
               )}
             </article>
+
+            <TaskCoordination key={currentTask.id} projectId={currentTask.projectId} taskId={currentTask.id} onOpenThread={onOpenThread} />
 
             <IssueSubIssues
               task={currentTask}

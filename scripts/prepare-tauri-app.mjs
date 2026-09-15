@@ -252,6 +252,7 @@ async function copyApplicationResources() {
     "codex-injector.mjs",
     "codex-injector-runtime.mjs",
     "codex-rate-limits.mjs",
+    "project-manager-coordinator.mjs",
     "taskboard-supervisor.mjs",
     "windows-codex.mjs",
   ]) {

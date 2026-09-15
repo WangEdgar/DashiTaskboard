@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createProjectManagerCoordinator } from "./project-manager-coordinator.mjs";
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
@@ -1333,6 +1334,21 @@ function eligibleRemoteAutomationTask(task) {
     && (task.relations?.blockedBy ?? []).every((dependency) => dependency.status === "done");
 }
 
+function runnableTaskboardAutomationTask(task) {
+  return task?.status === "todo"
+    && task.archivedAt === null
+    && (task.relations?.blockedBy ?? []).every((dependency) => dependency.status === "done");
+}
+
+async function projectManagerCoordinationEnabled(projectId) {
+  try {
+    const response = await taskboardRequest(`/api/projects/${encodeURIComponent(projectId)}/coordination`);
+    return response?.config?.enabled === true;
+  } catch {
+    return false;
+  }
+}
+
 function remoteAutomationSnapshot(task, comments, attachments) {
   return JSON.stringify({
     task: {
@@ -1531,6 +1547,7 @@ async function runRemoteTaskboardAutomation(record) {
     || request.codexProjectKind !== "remote"
     || quotaPolicyRecords.get(request.taskboardProjectId)?.version !== version
   ) return;
+  if (await projectManagerCoordinationEnabled(request.taskboardProjectId)) return;
 
   const listed = await taskboardRequest(
     `/api/tasks?projectId=${encodeURIComponent(request.taskboardProjectId)}&status=todo`,
@@ -1759,7 +1776,10 @@ async function applyTaskboardAutomationPolicy(
     throw new Error("Taskboard todo check returned invalid JSON");
   }
   const hasTodo = todoPayload ? todoPayload.tasks.length > 0 : null;
-  const quota = request.quotaAware && hasTodo !== false
+  const hasRunnableTodo = todoPayload
+    ? todoPayload.tasks.some(runnableTaskboardAutomationTask)
+    : null;
+  const quota = request.quotaAware && hasRunnableTodo !== false
     ? await readCodexQuotaStatus(request.model)
     : null;
   if (!stillCurrent()) return { quota, stale: true };
@@ -1771,7 +1791,7 @@ async function applyTaskboardAutomationPolicy(
     const currentItem = remoteAutomationItem(request, currentStatus, remoteNextRunAt);
     const operation = taskboardAutomationPolicyOperation(request, {
       explicit,
-      hasTodo,
+      hasTodo: hasRunnableTodo,
       previousQuotaState,
       quotaState: quota?.state,
       currentStatus,
@@ -1793,6 +1813,7 @@ async function applyTaskboardAutomationPolicy(
       items: [item],
       operation,
       hasTodo,
+      hasRunnableTodo,
       ...(quota ? { quota } : {}),
     };
   }
@@ -1809,7 +1830,7 @@ async function applyTaskboardAutomationPolicy(
   }
   const operation = taskboardAutomationPolicyOperation(request, {
     explicit,
-    hasTodo,
+    hasTodo: hasRunnableTodo,
     previousQuotaState,
     quotaState: quota?.state,
     currentStatus: currentItem?.status,
@@ -1818,9 +1839,9 @@ async function applyTaskboardAutomationPolicy(
     ? { item: currentItem, items: listed.items }
     : await reconcileTaskboardAutomation({ ...request, operation }, rpc);
   if (result?.error === "not-found") {
-    return { operation, hasTodo, ...(quota ? { quota } : {}) };
+    return { operation, hasTodo, hasRunnableTodo, ...(quota ? { quota } : {}) };
   }
-  return { ...result, operation, hasTodo, ...(quota ? { quota } : {}) };
+  return { ...result, operation, hasTodo, hasRunnableTodo, ...(quota ? { quota } : {}) };
 }
 
 function storedAutomationPolicy(request) {
@@ -2085,6 +2106,37 @@ async function enqueueCurrentQuotaPolicy(projectId) {
   );
 }
 
+
+let managerCoordinator;
+let managerCoordinatorTimer;
+function ensureManagerCoordinator() {
+  if (!managerCoordinator) {
+    managerCoordinator = createProjectManagerCoordinator({
+      request: taskboardRequest,
+      runtimeFile: taskboardRuntimeFile,
+      rpc: (host, method, params) => requestCodexAppServerViaCdp(
+        currentQuotaPolicyCdp(), undefined, host, method, params,
+      ),
+      disableLegacy: async (projectId) => {
+        await ensureQuotaPoliciesLoaded();
+        const record = quotaPolicyRecords.get(projectId);
+        if (!record?.request.enabledByUser) return;
+        await updateAndApplyQuotaPolicy({ ...record.request, enabledByUser: false },
+          (method, params) => requestCodexAutomationViaCdp(currentQuotaPolicyCdp(), undefined, method, params));
+      },
+      log: (message) => console.error(message),
+    });
+  }
+  const check = () => managerCoordinator.tick().catch((error) => {
+    console.error("Taskboard manager check failed: " + error.message);
+  });
+  if (!managerCoordinatorTimer) {
+    managerCoordinatorTimer = setInterval(check, 15_000);
+    managerCoordinatorTimer.unref();
+  }
+  void check();
+}
+
 async function restoreQuotaPolicies(cdp) {
   registerQuotaPolicyCdp(cdp);
   if (restoredQuotaPolicyCdps.has(cdp)) return;
@@ -2092,7 +2144,10 @@ async function restoreQuotaPolicies(cdp) {
   if (pending) return pending;
   const restoring = (async () => {
     await ensureQuotaPoliciesLoaded();
+    const coordination = await taskboardRequest("/api/local/coordination");
+    const managed = new Set((coordination.projects ?? []).filter((item) => item.config.enabled).map((item) => item.projectId));
     for (const [projectId, record] of quotaPolicyRecords) {
+      if (managed.has(projectId)) continue;
       if (record.request.enabledByUser) {
         await enqueueCurrentQuotaPolicy(projectId);
       }
@@ -2102,6 +2157,7 @@ async function restoreQuotaPolicies(cdp) {
   quotaPolicyRestorePromises.set(cdp, restoring);
   try {
     await restoring;
+    ensureManagerCoordinator();
   } finally {
     quotaPolicyRestorePromises.delete(cdp);
   }
@@ -2929,6 +2985,8 @@ async function main() {
   const requestStop = () => {
     if (stopping) return;
     stopping = true;
+    clearInterval(managerCoordinatorTimer);
+    managerCoordinator?.stop();
     wakeCodexRendererRequests();
     wakeStop();
     cleanup().catch((error) => {

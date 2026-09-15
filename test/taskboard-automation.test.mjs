@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -53,6 +54,29 @@ const remoteRequest = {
     },
   ],
 };
+
+test("remote auto-claim skips projects managed by fixed manager coordination", () => {
+  const source = fs.readFileSync(
+    fileURLToPath(new URL("../scripts/codex-injector.mjs", import.meta.url)),
+    "utf8",
+  );
+  assert.match(source, /async function projectManagerCoordinationEnabled/);
+  assert.match(source, /\/api\/projects\/.*\/coordination/);
+  assert.match(
+    source,
+    /if \(await projectManagerCoordinationEnabled\(request\.taskboardProjectId\)\) return;/,
+  );
+});
+
+test("automation policy uses runnable todo tasks instead of blocked todo count", () => {
+  const source = fs.readFileSync(
+    fileURLToPath(new URL("../scripts/codex-injector.mjs", import.meta.url)),
+    "utf8",
+  );
+  assert.match(source, /function runnableTaskboardAutomationTask/);
+  assert.match(source, /hasRunnableTodo = todoPayload[\s\S]*tasks\.some\(runnableTaskboardAutomationTask\)/);
+  assert.match(source, /hasTodo: hasRunnableTodo/);
+});
 
 test("the automation host request accepts catalog-provided project automation options", () => {
   assert.deepEqual(parseTaskboardAutomationHostRequest(baseRequest), baseRequest);
