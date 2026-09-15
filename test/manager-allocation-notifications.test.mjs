@@ -114,5 +114,7 @@ test('in-progress comments wake the assigned business manager without creating a
   assert.equal(sent.length, 1);
   assert.equal(sent[0].threadId, 'worker');
   assert.match(sent[0].input[0].text, /你是被总经理分派的业务经理/);
+  assert.match(sent[0].input[0].text, /只在当前固定经理会话执行/);
   assert.doesNotMatch(sent[0].input[0].text, /你是项目总经理/);
+  assert.ok(sent[0].input[0].text.length < 2200, 'business manager wake prompt stays concise');
 });

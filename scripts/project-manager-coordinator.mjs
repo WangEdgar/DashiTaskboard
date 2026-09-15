@@ -12,6 +12,26 @@ const isBusy = (thread) => thread?.status?.type === "active"
 const taskVersionMap = (tasks) => Object.fromEntries(tasks.map((task) => [task.id, task.version]));
 const quote = (value) => "'" + String(value).replaceAll("'", "''") + "'";
 const waitPattern = /(?:请|暂时|暂不|先|需要).{0,8}(?:暂停|等待|不要执行|不要开发)|等待(?:确认|确定|验收|通知)|on hold|do not (?:start|implement)/i;
+const compact = (value, limit = 220) => {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text.length > limit ? text.slice(0, limit - 1) + "…" : text;
+};
+const managerTaskSummary = (tasks) => tasks.map((task) => ({
+  id: task.id,
+  key: task.identifier,
+  title: compact(task.title, 120),
+  status: task.status,
+  version: task.version,
+  latestUserComment: compact(
+    [...(task.coordinationComments ?? [])].reverse().find((comment) => comment.authorType !== "agent")?.body,
+  ),
+}));
+const managerAssignmentSummary = (assignment) => assignment ? {
+  id: assignment.id,
+  state: assignment.state,
+  managerId: assignment.managerId,
+  taskIds: assignment.taskIds,
+} : null;
 
 export function managerCliPrefix(runtimeFile) {
   const cli = fileURLToPath(new URL("../cli/taskctl.mjs", import.meta.url));
@@ -22,38 +42,33 @@ export function managerCliPrefix(runtimeFile) {
 export function managerWakePrompt({ projectId, config, tasks, assignments, runtimeFile, managerId, assignment }) {
   const prefix = managerCliPrefix(runtimeFile);
   const common = [
-    "DashiTaskboard 项目经理联动。开发人员通过任务描述、附件、最新评论和验收标准精确限定工作，不得自行扩大范围。",
+    "DashiTaskboard 经理联动：只在当前固定经理会话执行，不要创建临时会话，也不要发到普通项目会话。",
     "项目目录：" + config.projectIdentity.workspacePath,
-    "所有任务操作使用此精确命令前缀：" + prefix,
-    "开始前读取项目 AGENTS.md、PROJECT_AGENTS.md。对将要处理的每张卡执行 issue get、comment list、attachment list --task；必须读取最新内容后行动。忽略旧快照中的过期要求，尊重暂停、等待和返工指示。",
-    "看板 in_progress 仅表示任务业务状态，不代表进程正在开发。已有任务会话、分支与工作树必须保留，不能抢占其他经理的工作。",
-    "不要重启 Codex、停止 Taskboard，或改变项目外的运行环境。没有真实验证证据不得宣称开发完成，也不得自动标记 done。",
-    "当前任务摘要：" + JSON.stringify(tasks.map(({ id, identifier, title, status, version }) => ({ id, identifier, title, status, version }))),
+    "taskctl 前缀：" + prefix,
+    "先读取 AGENTS.md、PROJECT_AGENTS.md，并对本轮任务执行 issue get、comment list、attachment list --task 后再行动；最新评论要求等待时先报告 waiting_user。",
+    "不能重启 Codex、停止 Taskboard、抢占其他经理会话，或自动标记 done。",
+    "任务摘要：" + JSON.stringify(managerTaskSummary(tasks)),
   ];
   if (managerId === "general") {
     return [
       ...common,
-      "你是项目总经理。先总经理认领，再按业务边界分组交给业务经理；不要亲自用临时会话逐卡开工。",
-      "先查看 coordination get " + projectId + "。只认领允许开始且依赖已 done 的 todo；无任务可开始时记录明确阻塞，不改完成状态。",
+      "角色：你是项目总经理。先认领允许开始且依赖已 done 的 todo，再按业务边界分组派给已配置业务经理；不要亲自逐卡开发。",
+      "查看：" + prefix + " coordination get " + projectId,
       "认领命令：" + prefix + " coordination claim " + quote(projectId) + " --task-ids '任务UUID,任务UUID' --versions '最新任务ID到version的JSON对象' --thread-id " + quote(config.generalManager.threadId),
       "分派命令：" + prefix + " coordination dispatch " + quote(projectId) + " --task-ids '同业务的一组任务UUID' --manager-id '已配置业务经理ID' --versions '重新读取的版本JSON' --thread-id " + quote(config.generalManager.threadId),
-      "认领和分派都必须使用刚读取的任务版本，冲突后重新核对开发人员改动。分派API创建队列，常驻调度器负责唤醒业务经理；不要额外调用 send_message_to_thread/create_thread 重复派发。",
-      "业务经理名册：" + JSON.stringify(config.businessManagers.map(({ id, name, scope, threadId }) => ({ id, name, scope, threadId }))),
-      "已有执行分组：" + JSON.stringify(assignments),
-      "已有 in_progress 先核对真实执行与本项目配置的经理归属。错误的历史导入绑定先报告，不把其他项目的会话接管为执行者。",
-      "同一业务链合并派发，共享代码或运行时冲突的组串行；业务经理忙碌时让队列保留。工作完成后汇总证据和剩余阻塞，交开发人员验收。",
-      "若必须增加业务经理，在 Taskboard 经理联动配置中按 项目名｜业务经理｜业务范围 绑定或按需创建；保留已存在的会话名称。不要自行创建一批临时会话。",
+      "分派后由常驻调度器唤醒业务经理；不要调用 send_message_to_thread 或 create_thread 重复派发。",
+      "业务经理：" + JSON.stringify(config.businessManagers.map(({ id, name, scope, threadId }) => ({ id, name, scope, threadId }))),
+      "现有分组：" + JSON.stringify((assignments ?? []).map(managerAssignmentSummary)),
     ].join("\n");
   }
   return [
     ...common,
-    "你是被总经理分派的业务经理，只处理下列分组：" + JSON.stringify(assignment),
-    "总经理已完成认领。你不得认领其他未分派任务，按最新任务说明完成本组实现与直接验证；先通过 issue get 重新核对当前绑定确属本会话。",
-    "开发人员在执行过程中新增的反馈，在下一安全节点重新读取并纳入工作；暂停或不一致范围应先报告 waiting_user，不继续使用旧需求。",
-    "每个有效执行阶段用 comment add 写实现和验证证据。结束时必须使用 coordination report 回写。",
+    "角色：你是被总经理分派的业务经理，只处理这个分组：" + JSON.stringify(managerAssignmentSummary(assignment)),
+    "总经理已认领。按最新任务说明和开发人员最新评论实现并直接验证；开始前核对任务绑定确属本会话。",
+    "有效进展用 comment add 记录；结束时必须用 coordination report 回写。",
     "回写命令：" + prefix + " coordination report " + quote(projectId) + " --task-ids " + quote(tasks.map((task) => task.id).join(",")) + " --state awaiting_review --message '实际改动、验证结果和剩余事项' --versions '结束时重新读取的任务版本JSON' --thread-id " + quote(config.businessManagers.find((manager) => manager.id === managerId)?.threadId),
-    "不能完成时 state 使用 waiting_user、blocked 或 interrupted，写明具体原因。awaiting_review 表示已验证待人工验收；不得将只有回答、没有实现或验证的任务报为开发完成。",
-    "开始时任务版本参考（结束时必须重新读取）：" + JSON.stringify(taskVersionMap(tasks)),
+    "不能完成时 state 使用 waiting_user、blocked 或 interrupted 并写明原因；只有实现且验证后才能报 awaiting_review。",
+    "版本参考（结束时重新读取）：" + JSON.stringify(taskVersionMap(tasks)),
   ].join("\n");
 }
 

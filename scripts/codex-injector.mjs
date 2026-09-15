@@ -1334,6 +1334,15 @@ function eligibleRemoteAutomationTask(task) {
     && (task.relations?.blockedBy ?? []).every((dependency) => dependency.status === "done");
 }
 
+async function projectManagerCoordinationEnabled(projectId) {
+  try {
+    const response = await taskboardRequest(`/api/projects/${encodeURIComponent(projectId)}/coordination`);
+    return response?.config?.enabled === true;
+  } catch {
+    return false;
+  }
+}
+
 function remoteAutomationSnapshot(task, comments, attachments) {
   return JSON.stringify({
     task: {
@@ -1532,6 +1541,7 @@ async function runRemoteTaskboardAutomation(record) {
     || request.codexProjectKind !== "remote"
     || quotaPolicyRecords.get(request.taskboardProjectId)?.version !== version
   ) return;
+  if (await projectManagerCoordinationEnabled(request.taskboardProjectId)) return;
 
   const listed = await taskboardRequest(
     `/api/tasks?projectId=${encodeURIComponent(request.taskboardProjectId)}&status=todo`,
